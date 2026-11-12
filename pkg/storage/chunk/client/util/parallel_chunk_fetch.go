@@ -2,6 +2,7 @@ package util //nolint:revive
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/go-kit/log/level"
@@ -13,6 +14,8 @@ import (
 )
 
 var tracer = otel.Tracer("pkg/storage/chunk/client/util")
+
+var ErrChunkMissing = errors.New("chunk object not found in storage")
 
 var decodeContextPool = sync.Pool{
 	New: func() interface{} {
@@ -41,7 +44,7 @@ func GetParallelChunks(ctx context.Context, maxParallel int, chunks []chunk.Chun
 	}()
 
 	processedChunks := make(chan chunk.Chunk)
-	errors := make(chan error)
+	errs := make(chan error)
 
 	for i := 0; i < min(maxParallel, len(chunks)); i++ {
 		go func() {
@@ -49,7 +52,7 @@ func GetParallelChunks(ctx context.Context, maxParallel int, chunks []chunk.Chun
 			for c := range queuedChunks {
 				c, err := f(ctx, decodeContext, c)
 				if err != nil {
-					errors <- err
+					errs <- err
 				} else {
 					processedChunks <- c
 				}
@@ -64,8 +67,10 @@ func GetParallelChunks(ctx context.Context, maxParallel int, chunks []chunk.Chun
 		select {
 		case chunk := <-processedChunks:
 			result = append(result, chunk)
-		case err := <-errors:
-			lastErr = err
+		case err := <-errs:
+			if lastErr == nil || errors.Is(lastErr, ErrChunkMissing) {
+				lastErr = err
+			}
 		}
 	}
 

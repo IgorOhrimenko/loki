@@ -3,6 +3,7 @@ package fetcher
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -11,11 +12,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.opentelemetry.io/otel"
 
+	"github.com/grafana/loki/v4/pkg/logqlmodel/metadata"
 	"github.com/grafana/loki/v4/pkg/logqlmodel/stats"
 	"github.com/grafana/loki/v4/pkg/storage/chunk"
 	"github.com/grafana/loki/v4/pkg/storage/chunk/cache"
 	"github.com/grafana/loki/v4/pkg/storage/chunk/client"
 	"github.com/grafana/loki/v4/pkg/storage/chunk/client/congestion"
+	"github.com/grafana/loki/v4/pkg/storage/chunk/client/util"
 	"github.com/grafana/loki/v4/pkg/storage/config"
 	"github.com/grafana/loki/v4/pkg/util/constants"
 	util_log "github.com/grafana/loki/v4/pkg/util/log"
@@ -234,6 +237,15 @@ func (c *Fetcher) FetchChunks(ctx context.Context, chunks []chunk.Chunk) ([]chun
 	st.AddCacheEntriesStored(stats.ChunkCache, len(fromStorage))
 	st.AddCacheBytesSent(stats.ChunkCache, bytes)
 
+	if storageErr != nil && ctx.Err() == nil && errors.Is(storageErr, util.ErrChunkMissing) {
+		failures := len(missing) - len(fromStorage)
+		storageErrors.WithLabelValues(storageErrorNotFound).Inc()
+		st.AddChunkFetchFailures(int64(failures))
+		level.Warn(log).Log("msg", "skipping chunks missing in object storage", "missing", failures, "err", storageErr)
+		_ = metadata.AddWarnings(ctx, fmt.Sprintf("%d chunk(s) not found in object storage, results are partial", failures))
+		storageErr = nil
+	}
+
 	if storageErr != nil {
 		// Only treat this as an expected, benign cancellation if the query itself was canceled
 		// or timed out: storageErr can also be (or wrap) context.Canceled/DeadlineExceeded from
@@ -354,7 +366,7 @@ func (c *Fetcher) processCacheResponse(ctx context.Context, chunks []chunk.Chunk
 }
 
 func (c *Fetcher) storageErrorReason(err error) string {
-	if c.storage.IsChunkNotFoundErr(err) {
+	if errors.Is(err, util.ErrChunkMissing) || c.storage.IsChunkNotFoundErr(err) {
 		return storageErrorNotFound
 	}
 	if c.storage.IsRetryableErr(err) {

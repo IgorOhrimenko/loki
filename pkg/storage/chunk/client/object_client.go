@@ -160,7 +160,13 @@ func (o *client) GetChunks(ctx context.Context, chunks []chunk.Chunk) ([]chunk.C
 	if getChunkMaxParallel == 0 {
 		getChunkMaxParallel = defaultMaxParallel
 	}
-	return util.GetParallelChunks(ctx, getChunkMaxParallel, chunks, o.getChunk)
+	return util.GetParallelChunks(ctx, getChunkMaxParallel, chunks, func(ctx context.Context, dc *chunk.DecodeContext, c chunk.Chunk) (chunk.Chunk, error) {
+		res, err := o.getChunk(ctx, dc, c)
+		if err != nil && o.store.IsObjectNotFoundErr(err) {
+			return res, fmt.Errorf("%w: %w", util.ErrChunkMissing, err)
+		}
+		return res, err
+	})
 }
 
 func (o *client) getChunk(ctx context.Context, decodeContext *chunk.DecodeContext, c chunk.Chunk) (chunk.Chunk, error) {
